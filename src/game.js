@@ -1067,13 +1067,18 @@ cv.addEventListener('pointerup', drop); cv.addEventListener('pointercancel', dro
 
 // ---------- boot ----------
 document.addEventListener('click', e => { const b = e.target.closest('button'); if (b && !b.disabled && b.id !== 'sound') SFX.tap(); });  // S-18
-$('sound').onclick = () => { settings.muted = !SFX.muted; saveSettings(); SFX.setMuted(settings.muted); if (raced) SFX.enableMusic(); renderSound(); SFX.tap(); };
+$('sound').onclick = () => {
+  settings.muted = !SFX.muted; saveSettings(); SFX.setMuted(settings.muted); if (raced) SFX.enableMusic(); renderSound(); SFX.tap();
+  // iPhone before iOS 17 still obeys the silent switch: say so once when sound is turned on
+  if (!settings.muted && SFX.ios && !navigator.audioSession && !settings.iosNote) { settings.iosNote = true; saveSettings(); $('tip').textContent = '音が出ないときは、iPhoneのマナーモード（消音スイッチ）を解除してください'; }
+};
 SFX.setMuted(settings.muted); renderSound();
-if (!settings.muted) {
-  // browsers only start audio inside a gesture: resume on the first touch
-  const wake = () => { SFX.setMuted(false); if (raced) SFX.enableMusic(); removeEventListener('pointerdown', wake); };
-  addEventListener('pointerdown', wake);
-}
+// browsers only start audio inside a tap, and iPhone counts the finger lifting, not touching:
+// unlock on every such event (cheap once running), so a saved "sound ON" works from the first tap
+['touchend', 'pointerup', 'click', 'keydown'].forEach(t => addEventListener(t, () => {
+  if (SFX.muted || SFX.running) return;
+  SFX.unlock(); if (raced) SFX.enableMusic();
+}, { capture: true, passive: true }));
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readColors);
 window.addEventListener('resize', resize);
 window.addEventListener('hashchange', () => location.reload());

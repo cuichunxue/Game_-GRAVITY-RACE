@@ -12,11 +12,35 @@ const SFX = (() => {
     'slow-motion', 'finish', 'photo-finish', 'victory-jingle', 'close-loss-jingle', 'personal-best', 'course-out', 'stall',
     'grab', 'release', 'ratchet', 'tap', 'unlock', 'copy'];
 
+  // ---- iPhone / iPad ----
+  // WebKit mutes Web Audio with the ringer (silent) switch unless the page's audio session is "playback",
+  // and only lets audio start inside a tap (touchend/click — not pointerdown).
+  const IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  function playbackSession() { try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {} }
+  let keepAlive = null;
+  function silentWav() {
+    // 0.25 s of silence, 8 kHz mono PCM
+    const n = 2000, b = new Uint8Array(44 + n), v = new DataView(b.buffer), w = (o, t) => [...t].forEach((c, i) => b[o + i] = c.charCodeAt(0));
+    w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true); w(36, 'data'); v.setUint32(40, n, true);
+    b.fill(128, 44);
+    let s = ''; b.forEach(c => s += String.fromCharCode(c)); return 'data:audio/wav;base64,' + btoa(s);
+  }
+  function legacySession(on) {
+    // iOS < 17 has no navigator.audioSession: a silent <audio> loop started in a tap switches the session to playback
+    if (!IOS || navigator.audioSession) return;
+    if (on) {
+      if (!keepAlive) { keepAlive = new Audio(silentWav()); keepAlive.loop = true; keepAlive.setAttribute('playsinline', ''); }
+      keepAlive.play().catch(() => {});
+    } else if (keepAlive) keepAlive.pause();
+  }
+
   function ensure() {
     if (muted) return null;
     if (!ac) {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return null;
+      playbackSession();
       ac = new AC();
       const comp = ac.createDynamicsCompressor();
       master = ac.createGain(); master.gain.value = 0.9;
@@ -32,9 +56,10 @@ const SFX = (() => {
   }
   function load(path) {
     if (buf[path] || loading[path]) return loading[path] || Promise.resolve(buf[path]);
-    loading[path] = fetch(`audio/${path}.${EXT}`).then(r => { if (!r.ok) throw r.status; return r.arrayBuffer(); })
-      .then(d => new Promise((res, rej) => ac.decodeAudioData(d, res, rej)))
-      .then(b => (buf[path] = b), () => null);
+    const get = ext => fetch(`audio/${path}.${ext}`).then(r => { if (!r.ok) throw r.status; return r.arrayBuffer(); })
+      .then(d => new Promise((res, rej) => ac.decodeAudioData(d, res, rej)));
+    // a browser can claim OGG support and still fail to decode it: fall back to the other format
+    loading[path] = get(EXT).catch(() => get(EXT === 'ogg' ? 'm4a' : 'ogg')).then(b => (buf[path] = b), () => null);
     return loading[path];
   }
   const loadAll = paths => Promise.all(paths.map(load));
@@ -166,9 +191,20 @@ const SFX = (() => {
     get muted() { return muted; },
     setMuted(m) {
       muted = m;
-      if (m) { rollStop(); if (music) { music.s.stop(); music = null; } if (ac) ac.suspend(); }
-      else { ensure(); setMusic(wantMusic); }
+      if (m) { rollStop(); if (music) { music.s.stop(); music = null; } if (ac) ac.suspend(); legacySession(false); }
+      else { this.unlock(); setMusic(wantMusic); }
     },
+    // call from inside every tap: (re)starts audio where the browser requires a user gesture
+    unlock() {
+      if (muted) return;
+      playbackSession();
+      const a = ensure(); if (!a) return;
+      legacySession(true);
+      if (a.state !== 'running') a.resume();
+      const b = a.createBuffer(1, 1, 22050), s = a.createBufferSource(); s.buffer = b; s.connect(a.destination); s.start(0);
+    },
+    get running() { return !!ac && ac.state === 'running'; },
+    ios: IOS,
     enableMusic() {
       if (musicReady || muted || !ensure()) return;
       loadAll(['music/edit', 'music/race']).then(() => { musicReady = true; setMusic(wantMusic); });
