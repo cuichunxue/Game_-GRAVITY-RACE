@@ -224,7 +224,7 @@ const crs = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0
 const nrm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 function camBasis() { cam.f = nrm(sub(cam.look, cam.pos)); cam.r = nrm(crs(cam.f, [0, 1, 0])); cam.u = crs(cam.r, cam.f); }
 function persp(x, y, z) {
-  const d = sub([x, y, z], cam.pos), zc = Math.max(0.3, dot(d, cam.f)), F = H * 1.05;
+  const d = sub([x, y, z], cam.pos), zc = Math.max(0.3, dot(d, cam.f)), F = H * 1.3;
   return [W / 2 + F * dot(d, cam.r) / zc, H * 0.5 - F * dot(d, cam.u) / zc, F / zc];
 }
 const ease = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
@@ -258,8 +258,17 @@ function drawLaneFlat(tr, opt) {
 }
 const LIGHT = nrm([-0.35, 1, 0.5]);
 function drawLane3D(tr, z, opt) {
-  const P = tr.pts, w = 0.2, th = 0.1, step = 2, A = opt.alpha ?? 1;
+  const P = tr.pts, w = opt.w ?? 0.2, step = 2, A = opt.alpha ?? 1;
   const fade = c => A < 1 ? mix(c, C.stage, 1 - A) : c;
+  if (opt.ghost) {
+    // other balls' routes: a single slim rail so they never compete with the player's lane
+    ctx.save(); ctx.globalAlpha = A; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); P.forEach((p, i) => { const m = proj(p[0], p[1], z); i ? ctx.lineTo(m[0], m[1]) : ctx.moveTo(m[0], m[1]); });
+    ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = Math.max(3, 0.09 * proj(P[0][0], P[0][1], z)[2]); ctx.stroke();
+    ctx.strokeStyle = opt.top; ctx.lineWidth = Math.max(2, 0.05 * proj(P[0][0], P[0][1], z)[2]); ctx.stroke();
+    ctx.restore(); return;
+  }
+  const th = 0.1;
   ctx.save();
   // the track's shadow on the floor, cast by the same light
   ctx.globalAlpha = 0.12 * ease(camT) * A; ctx.beginPath();
@@ -384,10 +393,49 @@ function label(text, at, color) {
   ctx.fillStyle = color; ctx.fillText(text, at[0], at[1] - 6); ctx.restore();
 }
 
+// index of the first track point the ball has not reached yet at time T (lands past a jump)
+function idxAt(sim, T) { let lo = 1, hi = Math.max(1, sim.last); while (lo < hi) { const m = (lo + hi) >> 1; if (sim.t[m] < T) lo = m + 1; else hi = m; } return lo; }
+function drawAhead(e, T) {
+  // the next stretch of the player's own route, lit so the eye knows where the ball is heading
+  const P = e.tr.pts, i0 = idxAt(e.sim, T), n = 70, end = Math.min(e.sim.ok ? P.length - 1 : e.sim.last, i0 + n);
+  if (end <= i0 + 1) return;
+  ctx.save(); ctx.lineCap = 'round'; ctx.strokeStyle = C.mint;
+  let prev = proj(P[i0][0], P[i0][1] + 0.02, e.z);
+  for (let i = i0 + 2; i <= end; i += 2) {
+    const q = proj(P[i][0], P[i][1] + 0.02, e.z);
+    ctx.globalAlpha = ease(camT) * 0.9 * (1 - (i - i0) / n);
+    ctx.lineWidth = Math.max(2, 0.07 * q[2]); ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(q[0], q[1]); ctx.stroke();
+    prev = q;
+  }
+  ctx.restore();
+}
+function drawMiniMap(l, entries) {
+  // the whole course, side-on, top right: where everyone is and what comes next
+  const mw = Math.min(150, W * 0.38), mh = mw * 0.8, x0 = W - mw - 10, y0 = 10;
+  const s = Math.min(mw / (BOX.x1 - BOX.x0), mh / (BOX.y1 - BOX.y0));
+  const ox = x0 + (mw - (BOX.x1 - BOX.x0) * s) / 2, oy = y0 + (mh - (BOX.y1 - BOX.y0) * s) / 2;
+  const m = (x, y) => [ox + (x - BOX.x0) * s, oy + (BOX.y1 - y) * s];
+  const line = (pts, color, width, dash) => { ctx.beginPath(); pts.forEach((p, i) => { const q = m(p[0], p[1]); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); }); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash || []); ctx.stroke(); };
+  ctx.save(); ctx.globalAlpha = ease(camT);
+  ctx.fillStyle = 'rgba(8,17,28,.62)'; ctx.beginPath(); ctx.roundRect(x0, y0, mw, mh, 10); ctx.fill();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  entries.forEach(e => { if (e.kind !== 'player') line(e.tr.pts, C[ENTRY_COLOR[e.kind]] || C.steel, 1.5, [3, 3]); });
+  const p = race.player; line(p.tr.pts, '#d79a58', 3);
+  const done = p.tr.pts.slice(0, idxAt(p.sim, race.T)); if (done.length > 1) line(done, '#3fc6a2', 3);
+  if (l.gate) { const g = m(l.gate.x, l.gate.y); ctx.setLineDash([]); ctx.strokeStyle = C.gate; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(g[0], g[1], l.gate.r * s, 0, Math.PI * 2); ctx.stroke(); }
+  const gl = m(l.goal[0], l.goal[1]), gt = m(l.goal[0], l.goal[1] + 0.9); ctx.setLineDash([]); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(gl[0], gl[1]); ctx.lineTo(gt[0], gt[1]); ctx.stroke();
+  entries.forEach(e => {
+    const b = ballPose(e.tr, e.sim, race.T), q = m(b.x, b.y), me = e.kind === 'player';
+    ctx.fillStyle = me ? '#ffffff' : (C[ENTRY_COLOR[e.kind]] || C.steel); ctx.beginPath(); ctx.arc(q[0], q[1], me ? 4 : 3, 0, Math.PI * 2); ctx.fill();
+    if (me) { ctx.strokeStyle = '#3fc6a2'; ctx.lineWidth = 2; ctx.stroke(); }
+  });
+  ctx.restore();
+}
 function laneStyles(kind) {
-  if (kind === 'rival') return { top: C.cobalt, side: C['wood-dark'], alpha: 0.55 };
-  if (kind === 'friend') return { top: C.friend, side: C['wood-dark'], alpha: 0.55 };
-  if (kind === 'best') return { top: C.muted, side: C['wood-dark'], alpha: 0.4 };
+  if (kind === 'rival') return { top: C.cobalt, ghost: true, alpha: 0.85 };
+  if (kind === 'friend') return { top: C.friend, ghost: true, alpha: 0.85 };
+  if (kind === 'best') return { top: C.steel, ghost: true, alpha: 0.6 };
   return { top: C.wood, side: C['wood-dark'], alpha: 1, wood: true };
 }
 
@@ -416,7 +464,8 @@ function draw() {
     // I-09 far scenery behind the chase camera, sliding slowly with it
     const sc = Math.max(W / bg.width, H / bg.height) * 1.25, w = bg.width * sc, h = bg.height * sc;
     ctx.save(); ctx.globalAlpha = ease(camT) * 0.85;
-    ctx.drawImage(bg, -Math.min(1, Math.max(0, cam.look[0] / 7)) * (w - W), (H - h) / 2 + (cam.look[1] - 1) * 6, w, h); ctx.restore();
+    ctx.drawImage(bg, -Math.min(1, Math.max(0, cam.look[0] / 7)) * (w - W), (H - h) / 2 + (cam.look[1] - 1) * 6, w, h);
+    ctx.fillStyle = '#08111c'; ctx.globalAlpha = ease(camT) * 0.35; ctx.fillRect(0, 0, W, H); ctx.restore();   // dim so the course reads first
   }
   if (race && race.shake > 0.01 && !REDUCED) ctx.translate((Math.random() - 0.5) * race.shake * 10, (Math.random() - 0.5) * race.shake * 10);
   drawGround();
@@ -427,6 +476,7 @@ function draw() {
       entries.forEach(e => drawLaneFlat(e.tr, e.kind === 'player' ? { color: C.wood } : { color: C[ENTRY_COLOR[e.kind]] || C.muted, dash: [6, 8], width: 4, alpha: 0.7 }));
     } else {
       entries.forEach(e => drawLane3D(e.tr, e.z, laneStyles(e.kind)));
+      if (race) drawAhead(race.player, race.T);
     }
     if (l.gate) drawGate(l.gate, 0);
     drawGoal(l.goal[0], l.goal[1]);
@@ -435,6 +485,7 @@ function draw() {
       const top = drawBall(e, pose, e.kind === 'best' ? 0.45 : 1);
       if (camT > 0.3) label(e.label, top, ENTRY_COLOR[e.kind] ? C[ENTRY_COLOR[e.kind]] : C.ink);
     });
+    if (race && camT > 0.3) drawMiniMap(l, entries);
     if (race && race.parts.length) {
       ctx.save(); ctx.fillStyle = C.wood;
       race.parts.forEach(pt => {
@@ -530,13 +581,13 @@ function startRace(choice) {
   if (l.kind === 'daily' && daily.used >= 3) return;
   const entries = [];
   if (l.kind === 'predict') {
-    entries.push(entry('rival', l.A, l.ball, -0.7, 'A 直線'));
-    entries.push(entry('player', l.B, l.ball, 0.4, 'B カーブ'));
+    entries.push(entry('rival', l.A, l.ball, -0.9, 'A 直線'));
+    entries.push(entry('player', l.B, l.ball, 0, 'B カーブ'));
   } else {
-    entries.push(entry('rival', l.rival.ctrl, l.rival.ball, -0.8, l.rival.name));
+    entries.push(entry('rival', l.rival.ctrl, l.rival.ball, -0.9, l.rival.name));
     entries.push(entry('player', ctrlOf(l, pins), l.ball, 0, 'あなた'));
-    if (friend && friend.idx === L) entries.push(entry('friend', ctrlOf(l, friend.pins), l.ball, 0.8, '友達'));
-    const bp = bestPins(); if (bp) entries.push(entry('best', ctrlOf(l, bp), l.ball, friend && friend.idx === L ? -1.6 : 0.8, '自己ベスト'));
+    if (friend && friend.idx === L) entries.push(entry('friend', ctrlOf(l, friend.pins), l.ball, -1.8, '友達'));
+    const bp = bestPins(); if (bp) entries.push(entry('best', ctrlOf(l, bp), l.ball, friend && friend.idx === L ? -2.7 : -1.8, '自己ベスト'));
     if (l.kind === 'daily') { daily.used++; store.set('gr-daily', daily); }
   }
   entries.forEach(e => {
@@ -546,7 +597,7 @@ function startRace(choice) {
   race = { T: 0, phase: 'intro', clock: 0, intro: 0, beat: -1, slow: false, entries, sorted: entries.slice().sort((a, b) => a.z - b.z),
            player: entries.find(e => e.kind === 'player'), choice,
            win: (() => { const pl = entries.find(e => e.kind === 'player'), rv = entries.find(e => e.kind === 'rival'); return pl.sim.ok && (!rv.sim.ok || pl.sim.time < rv.sim.time); })(), endT: Math.max(...entries.map(e => e.end)), parts: [], shake: 0 };
-  cam.look = [0.6, 2.6, 0]; cam.pos = [-1.4, 3.5, 4.2];
+  cam.look = [0.5, 2.7, -0.5]; cam.pos = [-0.7, 4.6, 5.0];
   mode = 'race'; highlight = null; picked = null; hideGuide();
   SFX.start(); SFX.music('race');
   $('result').innerHTML = ''; $('speed').textContent = ''; renderDock(); $('tip').textContent = '実時間の0.6倍速で再生。ゴール直前は0.15倍';
@@ -608,11 +659,12 @@ function tick(ts) {
       race.parts = race.parts.filter(pt => pt.life > 0);
     }
     if (race && race.phase !== 'outro') {
-      // follow the ball furthest along the course
-      let lx = -1, ly = 0;
-      race.entries.forEach(e => { const ps = ballPose(e.tr, e.sim, race.T); if (ps.x > lx) { lx = ps.x; ly = ps.y; } });
-      lx = Math.min(lx, lv().goal[0]); ly = Math.max(ly, BOX.y0 + 0.5);
-      const look = [lx + 0.7, ly - 0.15, -0.2], pos = [lx - 1.4, ly + 1.25, 3.9], k = 1 - Math.pow(0.002, dt);
+      // side-on chase of the player's own ball, framing where it is AND where its route goes next,
+      // so steep drops stay on screen (the old over-the-shoulder view lost the track ahead)
+      const p = race.player, endT = p.sim.ok ? p.sim.time : p.sim.t[p.sim.last];
+      const now = ballPose(p.tr, p.sim, race.T), ahead = ballPose(p.tr, p.sim, Math.min(race.T + 0.35, endT));
+      const lx = Math.min(now.x * 0.6 + ahead.x * 0.4, lv().goal[0]), ly = Math.max(now.y * 0.6 + ahead.y * 0.4, BOX.y0 + 0.5);
+      const look = [lx + 0.25, ly - 0.1, -0.5], pos = [lx - 0.9, ly + 1.75, 5.0], k = 1 - Math.pow(0.008, dt);
       for (let j = 0; j < 3; j++) { cam.look[j] += (look[j] - cam.look[j]) * k; cam.pos[j] += (pos[j] - cam.pos[j]) * k; }
     }
     dirty = true;
