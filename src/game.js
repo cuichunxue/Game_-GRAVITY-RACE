@@ -409,6 +409,16 @@ function drawAhead(e, T) {
   }
   ctx.restore();
 }
+// the start: a wooden deck the lanes come out of, so the track no longer begins in mid-air
+const startSpan = entries => [Math.min(...entries.map(e => e.z)) - 0.28, 0.28];
+function drawStartDeck(entries) {
+  const [z0, z1] = startSpan(entries), x0 = -0.8, x1 = 0.04, y = START[1], th = 0.22;
+  ctx.save(); ctx.globalAlpha = ease(camT);
+  poly([proj(x0, y, z1), proj(x1, y, z1), proj(x1, y - th, z1), proj(x0, y - th, z1)], shade(C['wood-dark'], 0.95));
+  poly([proj(x1, y, z0), proj(x1, y, z1), proj(x1, y - th, z1), proj(x1, y - th, z0)], shade(C['wood-dark'], 0.7));
+  poly([proj(x0, y, z0), proj(x1, y, z0), proj(x1, y, z1), proj(x0, y, z1)], shade(C.wood, 1.05));
+  ctx.restore();
+}
 function drawMiniMap(l, entries) {
   // the whole course, side-on, top right: where everyone is and what comes next
   const mw = Math.min(150, W * 0.38), mh = mw * 0.8, x0 = W - mw - 10, y0 = 10;
@@ -480,6 +490,7 @@ function draw() {
     }
     if (l.gate) drawGate(l.gate, 0);
     drawGoal(l.goal[0], l.goal[1]);
+    if (camT > 0.02) drawStartDeck(entries);
     entries.forEach(e => {
       const pose = ballPose(e.tr, e.sim, race ? race.T : 0);
       const top = drawBall(e, pose, e.kind === 'best' ? 0.45 : 1);
@@ -597,10 +608,10 @@ function startRace(choice) {
   race = { T: 0, phase: 'intro', clock: 0, intro: 0, beat: -1, slow: false, entries, sorted: entries.slice().sort((a, b) => a.z - b.z),
            player: entries.find(e => e.kind === 'player'), choice,
            win: (() => { const pl = entries.find(e => e.kind === 'player'), rv = entries.find(e => e.kind === 'rival'); return pl.sim.ok && (!rv.sim.ok || pl.sim.time < rv.sim.time); })(), endT: Math.max(...entries.map(e => e.end)), parts: [], shake: 0 };
-  cam.look = [0.5, 2.7, -0.5]; cam.pos = [-0.7, 4.6, 5.0];
+  cam.look = [0.75, 2.6, -0.5]; cam.pos = [0.4, 4.6, 5.0];
   mode = 'race'; highlight = null; picked = null; hideGuide();
   SFX.start(); SFX.music('race');
-  $('result').innerHTML = ''; $('speed').textContent = ''; renderDock(); $('tip').textContent = '実時間の0.6倍速で再生。ゴール直前は0.15倍';
+  $('result').innerHTML = ''; $('speed').textContent = ''; $('clock').innerHTML = '0.00<small>秒</small>'; renderDock(); $('tip').textContent = '実時間の0.6倍速で再生。ゴール直前は0.15倍';
 }
 function setCount(text, go) { const c = $('count'); c.hidden = !text; c.textContent = text || ''; c.classList.toggle('go', !!go); }
 let lastTs = 0;
@@ -664,7 +675,7 @@ function tick(ts) {
       const p = race.player, endT = p.sim.ok ? p.sim.time : p.sim.t[p.sim.last];
       const now = ballPose(p.tr, p.sim, race.T), ahead = ballPose(p.tr, p.sim, Math.min(race.T + 0.35, endT));
       const lx = Math.min(now.x * 0.6 + ahead.x * 0.4, lv().goal[0]), ly = Math.max(now.y * 0.6 + ahead.y * 0.4, BOX.y0 + 0.5);
-      const look = [lx + 0.25, ly - 0.1, -0.5], pos = [lx - 0.9, ly + 1.75, 5.0], k = 1 - Math.pow(0.008, dt);
+      const look = [lx + 0.35, ly - 0.15, -0.5], pos = [lx + 0.1, ly + 1.75, 5.0], k = 1 - Math.pow(0.008, dt);
       for (let j = 0; j < 3; j++) { cam.look[j] += (look[j] - cam.look[j]) * k; cam.pos[j] += (pos[j] - cam.pos[j]) * k; }
     }
     dirty = true;
