@@ -1,0 +1,15 @@
+{
+  "name": "GRAVITY RACE",
+  "short_name": "GRAVITY",
+  "description": "3本のピンで坂を作って、3秒の玉転がしレース",
+  "start_url": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#111920",
+  "theme_color": "#111920",
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
