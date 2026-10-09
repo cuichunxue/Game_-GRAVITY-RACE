@@ -137,7 +137,7 @@ const saveSettings = () => store.set('gr-settings', settings);
 let L = 0, pins = [], mode = 'edit', race = null, camT = 0, highlight = null, picked = null, friend = null, lastShare = null;
 const lv = () => LEVELS[L];
 const PLAY_RATE = 0.6, PLAY_SLOW = 0.15;   // playback speed of real physical time
-const INTRO = 1.2, COUNT_AT = [0, 0.4, 0.8]; // 3・2・1 then GO while the camera swings in
+const INTRO = 1.28, COUNT_AT = [0, 0.4, 0.84]; // beats of the S-05 start signal: 3・2・1, the bell releases the balls
 const ctrlOf = (lvl, p) => [START, ...p, lvl.goal];
 
 // ---------- ghost links: the pins travel in the URL hash, the receiver re-simulates them (deterministic) ----------
@@ -165,11 +165,27 @@ function readLink() {
 
 // ---------- DOM ----------
 const $ = id => document.getElementById(id);
-const cv = $('stage'), ctx = cv.getContext('2d');
+const cv = $('stage'), ctx = cv.getContext('2d'), wrapEl = $('wrap');
 let W = 0, H = 0, C = {}, DPR = 1, FONT = 'sans-serif', dirty = true, view = null;
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // edit view only repaints when something changed; `geom` also drops the cached tracks and simulation
 function invalidate(geom) { dirty = true; if (geom) view = null; }
+// ---------- image assets: course art after first paint, scenery after the first race (素材リスト 制作ルール) ----------
+const IMG = {}, BALL_IMG = { solid: 'steel', hollow: 'hollow', ice: 'ice' }, FX = ['woodchip-a', 'woodchip-b', 'woodchip-c', 'confetti-a', 'confetti-b', 'confetti-c'];
+const TEX_PER_M = 640;   // wood texture pixels per metre of track (256 px = the 0.4 m lane width)
+let woodPat = null, raced = false;
+function loadImg(key, src) {
+  if (key in IMG) return;
+  IMG[key] = null;
+  const im = new Image(); im.onload = () => { IMG[key] = im; invalidate(); }; im.src = src;
+}
+function loadRaceArt() {
+  loadImg('wood', 'assets/tex/wood.webp');
+  Object.values(BALL_IMG).forEach(b => loadImg('ball-' + b, `assets/ball/${b}.webp`));
+  FX.forEach(n => loadImg(n, `assets/fx/I-10-${n}.png`));
+}
+function loadScenery() { ['workshop', 'night-lab', 'glacier'].forEach(n => loadImg('bg-' + n, `assets/bg/${n}.webp`)); }
+const sceneryOf = l => 'bg-' + (l.ball === 'ice' ? 'glacier' : l.kind === 'daily' ? 'night-lab' : 'workshop');
 function readColors() {
   const cs = getComputedStyle(document.documentElement);
   ['paper', 'stage', 'ink', 'muted', 'line', 'panel', 'wood', 'wood-dark', 'steel', 'mint', 'cobalt', 'alert', 'gate', 'friend'].forEach(n => C[n] = cs.getPropertyValue('--' + n).trim());
@@ -252,6 +268,8 @@ function drawLane3D(tr, z, opt) {
   ctx.fillStyle = '#000'; ctx.fill();
   ctx.globalAlpha = 1; ctx.lineWidth = 0.6;
   const side = fade(shade(opt.side, 0.9));
+  if (opt.wood && !woodPat && IMG.wood) woodPat = ctx.createPattern(IMG.wood, 'repeat');
+  const pat = opt.wood && woodPat && woodPat.setTransform ? woodPat : null;
   for (let i = step; i < P.length; i += step) {
     const a = P[i - step], b = P[i], dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1;
     const q1 = proj(a[0], a[1], z - w), q2 = proj(b[0], b[1], z - w), q3 = proj(b[0], b[1], z + w), q4 = proj(a[0], a[1], z + w);
@@ -260,7 +278,15 @@ function drawLane3D(tr, z, opt) {
     const lam = Math.max(0, (-dy / L) * LIGHT[0] + (dx / L) * LIGHT[1]);   // Lambert term of the top surface
     const sd = hl ? C.alert : side, top = hl ? C.alert : fade(shade(opt.top, 0.62 + 0.5 * lam));
     poly([q4, q3, f2, f1], sd); ctx.strokeStyle = sd; ctx.stroke();
-    poly([q1, q2, q3, q4], top); ctx.strokeStyle = top; ctx.stroke();
+    if (pat && !hl) {
+      // I-06 wood mapped along the track: u follows arc length, v spans the lane (one affine map per quad)
+      const s0 = tr.s[i - step] * TEX_PER_M, ds = (tr.s[i] - tr.s[i - step]) * TEX_PER_M || 1;
+      const ma = (q2[0] - q1[0]) / ds, mb = (q2[1] - q1[1]) / ds;
+      pat.setTransform(new DOMMatrix([ma, mb, (q4[0] - q1[0]) / 256, (q4[1] - q1[1]) / 256, q1[0] - ma * s0, q1[1] - mb * s0]));
+      poly([q1, q2, q3, q4], pat); ctx.strokeStyle = pat; ctx.stroke();
+      const f = 0.62 + 0.5 * lam;   // same Lambert shading as the flat colour, as a light/dark wash
+      ctx.globalAlpha = Math.min(0.5, Math.abs(f - 1)); poly([q1, q2, q3, q4], f < 1 ? '#000' : '#fff'); ctx.globalAlpha = 1;
+    } else { poly([q1, q2, q3, q4], top); ctx.strokeStyle = top; ctx.stroke(); }
   }
   // steel rails along both edges
   [z - w, z + w].forEach((zz, k) => {
@@ -333,6 +359,10 @@ function drawBall(e, pose, alpha) {
     ctx.lineWidth = r * 0.42; ctx.strokeStyle = shade(base, 0.55);
     ctx.beginPath(); ctx.arc(q[0], q[1], r * 0.79, 0, Math.PI * 2); ctx.stroke();
     ctx.lineWidth = r * 0.2; ctx.strokeStyle = base; ctx.beginPath(); ctx.arc(q[0], q[1], r * 0.79, Math.PI * 0.9, Math.PI * 1.75); ctx.stroke();
+  } else if (!tint && IMG['ball-' + BALL_IMG[e.ball]]) {
+    // I-08 material previews as sprites; the spin marks below still show the rolling rate
+    if (e.ball === 'ice') ctx.globalAlpha = alpha * 0.9;
+    ctx.drawImage(IMG['ball-' + BALL_IMG[e.ball]], q[0] - r, q[1] - r, r * 2, r * 2);
   } else {
     const g = ctx.createRadialGradient(lx, ly, r * 0.05, q[0], q[1], r);
     g.addColorStop(0, '#ffffff'); g.addColorStop(0.28, base); g.addColorStop(0.85, shade(base, 0.45)); g.addColorStop(1, shade(base, 0.62));
@@ -349,7 +379,8 @@ function drawBall(e, pose, alpha) {
   return [q[0], q[1] - r];
 }
 function label(text, at, color) {
-  ctx.save(); ctx.font = '700 11px ' + FONT; ctx.textAlign = 'center';
+  ctx.save(); ctx.font = '700 11px ' + FONT; ctx.textAlign = 'center'; ctx.lineJoin = 'round';
+  ctx.strokeStyle = C.panel; ctx.lineWidth = 3; ctx.strokeText(text, at[0], at[1] - 6);
   ctx.fillStyle = color; ctx.fillText(text, at[0], at[1] - 6); ctx.restore();
 }
 
@@ -357,7 +388,7 @@ function laneStyles(kind) {
   if (kind === 'rival') return { top: C.cobalt, side: C['wood-dark'], alpha: 0.55 };
   if (kind === 'friend') return { top: C.friend, side: C['wood-dark'], alpha: 0.55 };
   if (kind === 'best') return { top: C.muted, side: C['wood-dark'], alpha: 0.4 };
-  return { top: C.wood, side: C['wood-dark'], alpha: 1 };
+  return { top: C.wood, side: C['wood-dark'], alpha: 1, wood: true };
 }
 
 // cached geometry for the edit view; rebuilt only when pins or level change
@@ -379,6 +410,14 @@ function draw() {
   camBasis();
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.fillStyle = C.stage; ctx.fillRect(0, 0, W, H);
+  const bg = camT > 0.02 && IMG[sceneryOf(lv())];
+  wrapEl.classList.toggle('scenic', !!bg);   // light HUD text over the darker scenery
+  if (bg) {
+    // I-09 far scenery behind the chase camera, sliding slowly with it
+    const sc = Math.max(W / bg.width, H / bg.height) * 1.25, w = bg.width * sc, h = bg.height * sc;
+    ctx.save(); ctx.globalAlpha = ease(camT) * 0.85;
+    ctx.drawImage(bg, -Math.min(1, Math.max(0, cam.look[0] / 7)) * (w - W), (H - h) / 2 + (cam.look[1] - 1) * 6, w, h); ctx.restore();
+  }
   if (race && race.shake > 0.01 && !REDUCED) ctx.translate((Math.random() - 0.5) * race.shake * 10, (Math.random() - 0.5) * race.shake * 10);
   drawGround();
   const l = lv();
@@ -398,7 +437,15 @@ function draw() {
     });
     if (race && race.parts.length) {
       ctx.save(); ctx.fillStyle = C.wood;
-      race.parts.forEach(pt => { const m = proj(pt.x, pt.y, pt.z); ctx.globalAlpha = Math.max(0, pt.life) * 0.8; ctx.beginPath(); ctx.arc(m[0], m[1], Math.max(1, 0.02 * m[2]), 0, Math.PI * 2); ctx.fill(); });
+      race.parts.forEach(pt => {
+        const m = proj(pt.x, pt.y, pt.z), im = IMG[pt.img];
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0); ctx.globalAlpha = Math.min(1, Math.max(0, pt.life)) * 0.9;
+        if (im) {   // I-10 woodchips and confetti
+          const sz = Math.max(4, pt.size * m[2]);
+          ctx.translate(m[0], m[1]); ctx.rotate(pt.rot);
+          ctx.drawImage(im, -sz / 2, -sz / 2, sz, sz);
+        } else { ctx.beginPath(); ctx.arc(m[0], m[1], Math.max(1, 0.02 * m[2]), 0, Math.PI * 2); ctx.fill(); }
+      });
       ctx.restore();
     }
     return;
@@ -497,9 +544,11 @@ function startRace(choice) {
     e.trail = [];
   });
   race = { T: 0, phase: 'intro', clock: 0, intro: 0, beat: -1, slow: false, entries, sorted: entries.slice().sort((a, b) => a.z - b.z),
-           player: entries.find(e => e.kind === 'player'), choice, endT: Math.max(...entries.map(e => e.end)), parts: [], shake: 0 };
+           player: entries.find(e => e.kind === 'player'), choice,
+           win: (() => { const pl = entries.find(e => e.kind === 'player'), rv = entries.find(e => e.kind === 'rival'); return pl.sim.ok && (!rv.sim.ok || pl.sim.time < rv.sim.time); })(), endT: Math.max(...entries.map(e => e.end)), parts: [], shake: 0 };
   cam.look = [0.6, 2.6, 0]; cam.pos = [-1.4, 3.5, 4.2];
   mode = 'race'; highlight = null; picked = null; hideGuide();
+  SFX.start(); SFX.music('race');
   $('result').innerHTML = ''; $('speed').textContent = ''; renderDock(); $('tip').textContent = '実時間の0.6倍速で再生。ゴール直前は0.15倍';
 }
 function setCount(text, go) { const c = $('count'); c.hidden = !text; c.textContent = text || ''; c.classList.toggle('go', !!go); }
@@ -511,12 +560,12 @@ function tick(ts) {
       race.intro += dt; camT = Math.min(1, race.intro / 0.7);
       // S-05: 3・2・1 then the bell exactly when the balls are released
       const beat = COUNT_AT.filter(t => race.intro >= t).length - 1;
-      if (beat > race.beat) { race.beat = beat; setCount(String(3 - beat)); SFX.count(); }
-      if (race.intro >= INTRO) { race.phase = 'run'; camT = 1; setCount('GO', true); SFX.go(); setTimeout(() => setCount(''), 350); }
+      if (beat > race.beat) { race.beat = beat; setCount(String(3 - beat)); }
+      if (race.intro >= INTRO) { race.phase = 'run'; camT = 1; setCount('GO', true); setTimeout(() => setCount(''), 350); }
     } else if (race.phase === 'run') {
       const rem = Math.min(...race.entries.filter(e => e.sim.ok && race.T < e.sim.time).map(e => e.sim.time - race.T).concat([Infinity]));
       const slow = rem < 0.22;
-      if (slow !== race.slow) { race.slow = slow; $('slow').hidden = !slow; if (slow) SFX.slow(); }
+      if (slow !== race.slow) { race.slow = slow; $('slow').hidden = !slow; SFX.muffle(slow); if (slow) SFX.slow(); }
       const T0 = race.T;
       race.T = Math.min(race.endT, race.T + dt * (slow ? PLAY_SLOW : PLAY_RATE));
       const p = race.player;
@@ -533,21 +582,29 @@ function tick(ts) {
           if (f.landed && T0 < f.t1 && race.T >= f.t1) {
             // landing: dust, a short camera shake, and a tap on phones that allow it
             const [, yt] = trackYAt(e.tr.pts, ep.x, 0), hit = Math.min(1, Math.hypot(f.vx, f.vy) / 8);
-            for (let q = 0; q < 14; q++) race.parts.push({ x: ep.x, y: yt + 0.02, z: e.z + (Math.random() - 0.5) * 0.3, vx: (Math.random() - 0.3) * 1.6, vy: Math.random() * 1.8 * hit + 0.3, vz: (Math.random() - 0.5) * 1.2, life: 1 });
+            for (let q = 0; q < 14; q++) race.parts.push({ x: ep.x, y: yt + 0.02, z: e.z + (Math.random() - 0.5) * 0.3, vx: (Math.random() - 0.3) * 1.6, vy: Math.random() * 1.8 * hit + 0.3, vz: (Math.random() - 0.5) * 1.2,
+              life: 1, fade: 1.4, gk: 0.5, img: FX[q % 3], size: 0.1, rot: Math.random() * 6, vr: (Math.random() - 0.5) * 14 });
             if (e === p) { race.shake = 0.6 * hit + 0.2; SFX.land(hit); try { navigator.vibrate && navigator.vibrate(18); } catch (err) {} }
           }
         });
-        if (e.sim.ok && T0 < e.sim.time && race.T >= e.sim.time) SFX.goal(e === p);
+        if (e.sim.ok && T0 < e.sim.time && race.T >= e.sim.time) {
+          SFX.goal(e === p);
+          if (e === p && race.win) {   // confetti over the finish line
+            const g = lv().goal;
+            for (let q = 0; q < 46; q++) race.parts.push({ x: g[0] - 0.1, y: g[1] + 0.9, z: (Math.random() - 0.5) * 2.4, vx: -Math.random() * 2.2, vy: Math.random() * 2.6 + 0.6, vz: (Math.random() - 0.5) * 1.5,
+              life: 2.2, fade: 0.9, gk: 0.12, img: FX[3 + q % 3], size: 0.12, rot: Math.random() * 6, vr: (Math.random() - 0.5) * 10 });
+          }
+        }
       });
       if (p.sim.ok && T0 < p.sim.time && race.T >= p.sim.time) { try { navigator.vibrate && navigator.vibrate([10, 40, 25]); } catch (err) {} }
       const failAt = p.sim.t[p.sim.last];
       if (!p.sim.ok && T0 < failAt && race.T >= failAt) { if (p.sim.fail === 'fly') SFX.courseOut(); else if (p.sim.fail === 'stall') SFX.stall(); }
-      if (race.T >= race.endT) { race.phase = 'hold'; race.clock = 0; $('slow').hidden = true; SFX.rollStop(); }
+      if (race.T >= race.endT) { race.phase = 'hold'; race.clock = 0; $('slow').hidden = true; SFX.rollStop(); SFX.muffle(false); }
     } else if (race.phase === 'hold') { race.clock += dt; if (race.clock > 0.8) race.phase = 'outro'; }
     else if (race.phase === 'outro') { camT = Math.max(0, camT - dt / 0.6); if (camT <= 0) finishRace(); }
     if (race) {
       race.shake *= Math.pow(0.02, dt);
-      race.parts.forEach(pt => { pt.vy -= G * 0.5 * dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.z += pt.vz * dt; pt.life -= dt * 1.4; });
+      race.parts.forEach(pt => { pt.vy -= G * pt.gk * dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.z += pt.vz * dt; pt.rot += pt.vr * dt; pt.life -= dt * pt.fade; });
       race.parts = race.parts.filter(pt => pt.life > 0);
     }
     if (race && race.phase !== 'outro') {
@@ -583,17 +640,26 @@ const FAIL_TEXT = {
 const fmt = t => isFinite(t) ? t.toFixed(2) + '秒' : '—';
 const signed = d => (d < 0 ? '−' : '+') + Math.abs(d).toFixed(2) + '秒';
 const ic = id => `<svg class="ic"><use href="#i-${id}"/></svg>`;
+// I-11 "なぜ？" diagrams, shown only after a loss (企画書: 説明は結果の後)
+const explain = (file, alt) => `<img class="explain" src="assets/explain/${file}.svg" alt="${alt}の図解" width="320" height="200" loading="lazy">`;
+function explainLoss(l, diff) {
+  if (diff < 0.05) return explain('06-photo-finish', '僅差の判定');
+  if (l.ball === 'hollow' || l.ball === 'ring') return explain('03-rolling-inertia', '回転慣性');
+  if (l.ball === 'ice') return explain('04-friction', '摩擦の影響');
+  return l.id === 'l1' ? explain('01-early-acceleration', '序盤の加速') : explain('02-distance-tradeoff', '距離と時間');
+}
 function finishRace() {
   const l = lv(), p = race.player, r = race.entries.find(e => e.kind === 'rival'), fr = race.entries.find(e => e.kind === 'friend');
   mode = 'edit'; const res = $('result'), unlockedBefore = progress.unlocked;
-  SFX.shutter();
+  SFX.shutter(); SFX.music('edit');
+  if (!raced) { raced = true; SFX.enableMusic(); loadScenery(); }
   let jingle = 'lose', pb = false;
   if (l.kind === 'predict') {
     const right = race.choice === 'B';
     jingle = right ? 'win' : 'lose';
     res.innerHTML = `<div class="card"><p class="label">結果</p><p class="verdict ${right ? 'win' : 'lose'}">${right ? '正解！' : 'ハズレ！'} 遠回りのBが勝ち</p>
       <div class="times"><span>A 直線</span><span>${fmt(r.sim.time)}</span><span>B カーブ</span><span>${fmt(p.sim.time)}</span></div>
-      <p class="why"><b>なぜ？</b> Bは最初に深く落ちるので、早い段階でスピードが乗ります。距離は長くても、平均の速さで直線を上回ります。</p>
+      <p class="why"><b>なぜ？</b> Bは最初に深く落ちるので、早い段階でスピードが乗ります。距離は長くても、平均の速さで直線を上回ります。</p>${explain('01-early-acceleration', '序盤の加速')}
       <div class="row"><button class="btn go" id="nx">自分で軌道を作る ${ic('next')}</button><button class="btn" id="sh">${ic('share')}出題する</button></div></div>`;
     progress.unlocked = Math.max(progress.unlocked, 2); store.set('gr-progress', progress);
     $('nx').onclick = () => setLevel(1);
@@ -602,7 +668,7 @@ function finishRace() {
     const [t1, t2] = FAIL_TEXT[p.sim.fail];
     const i = p.sim.failIdx; highlight = [Math.max(0, i - 12), Math.min(p.tr.pts.length - 1, i + 12)];
     lastShare = null;
-    res.innerHTML = `<div class="card"><p class="label">結果</p><p class="verdict lose">${t1}</p><p class="why">${t2}</p>${dailyBlock()}</div>`;
+    res.innerHTML = `<div class="card"><p class="label">結果</p><p class="verdict lose">${t1}</p><p class="why">${t2}</p>${p.sim.fail === 'fly' ? explain('05-launch', 'コースアウト') : ''}${dailyBlock()}</div>`;
   } else {
     const diff = p.sim.time - r.sim.time, win = diff < 0;
     const prev = progress.best[l.id];
@@ -620,7 +686,7 @@ function finishRace() {
       ${fr ? `<span>友達のゴースト</span><span>${fmt(fr.sim.time)}</span>` : ''}
       ${pb || !prev ? '<span>自己ベスト更新</span><span>✓</span>' : ''}${p.sim.jumps ? `<span>ジャンプ</span><span>${p.sim.jumps}回</span>` : ''}</div>
       ${fdiff !== null ? `<p class="why"><b>${fdiff < 0 ? '友達に勝ち！' : '友達まで ' + fdiff.toFixed(2) + '秒'}</b></p>` : ''}
-      ${win ? '' : `<p class="why"><b>なぜ？</b> 赤い区間でいちばん差がつきました。${l.hint}</p>`}
+      ${win ? '' : `<p class="why"><b>なぜ？</b> 赤い区間でいちばん差がつきました。${l.hint}</p>${explainLoss(l, diff)}`}
       <div class="row"><button class="btn go" id="sh">${ic('share')}挑戦状を送る</button>
       ${l.kind === 'daily' ? `<button class="btn" id="copy">${ic('copy')}コピー</button>` : ''}
       ${win && next && l.kind !== 'daily' ? `<button class="btn" id="nx">次のステージ ${ic('next')}</button>` : ''}</div>
@@ -662,14 +728,20 @@ async function renderCard(info) {
   const img = await loadCardBase(), c = document.createElement('canvas');
   c.width = 1200; c.height = 630;
   const x = c.getContext('2d');
-  if (img) x.drawImage(img, 0, 0); else { x.fillStyle = '#111920'; x.fillRect(0, 0, 1200, 630); }
-  const disp = getComputedStyle(document.documentElement).getPropertyValue('--f-display'), num = getComputedStyle(document.documentElement).getPropertyValue('--f-num');
-  x.fillStyle = '#3fc6a2'; x.font = `400 34px ${disp}`; x.fillText(info.head, 100, 232, 460);
+  if (img) x.drawImage(img, 0, 0); else { x.fillStyle = '#111c33'; x.fillRect(0, 0, 1200, 630); }
+  const disp = getComputedStyle(document.body).fontFamily, num = getComputedStyle(document.documentElement).getPropertyValue('--f-num');
+  // the base carries "DAILY CHALLENGE" and a "--.-- s" placeholder: cover both with the panel colour (data panel x 471–1075, y 276–510)
+  x.font = `700 26px ${disp}`;
+  const hw = Math.max(270, x.measureText(info.head).width + 36);
+  x.fillStyle = '#13263d'; x.strokeStyle = '#3b6585'; x.lineWidth = 2;
+  x.beginPath(); x.roundRect(476, 180, hw, 42, 21); x.fill(); x.stroke();
+  x.fillStyle = '#75e7b5'; x.fillText(info.head, 494, 210, hw - 36);
+  x.fillStyle = '#13263d'; x.fillRect(490, 336, 570, 160);
   const tt = info.time.toFixed(2);
-  x.fillStyle = '#e4ebef'; x.font = `500 128px ${num}`; x.fillText(tt, 96, 380, 400);
-  const tw = Math.min(400, x.measureText(tt).width);
-  x.font = `400 40px ${disp}`; x.fillText('秒', 96 + tw + 10, 380);
-  x.fillStyle = '#93a4af'; x.font = `500 26px ${num}, sans-serif`; x.fillText(info.sub, 100, 468, 460);
+  x.fillStyle = '#ffffff'; x.font = `500 104px ${num}`; x.fillText(tt, 502, 432, 420);
+  const tw = Math.min(420, x.measureText(tt).width);
+  x.font = `700 36px ${disp}`; x.fillText('秒', 502 + tw + 10, 432);
+  x.fillStyle = '#a9c6db'; x.font = `500 24px ${disp}`; x.fillText(info.sub, 506, 482, 540);
   return new Promise(res => { try { c.toBlob(b => res(b), 'image/png'); } catch (e) { res(null); } }); // tainted on file://
 }
 async function share() {
@@ -763,7 +835,7 @@ function setLevel(i) {
   pins = [];
   if (l.pins) { const bp = progress.best[l.id]; pins = (bp && bp.pins && bp.pins.length === l.pins.length ? bp.pins : l.pins).map(p => p.slice()); }
   mode = 'edit'; race = null; camT = 0; highlight = null; lastShare = null;
-  SFX.rollStop(); setCount(''); $('slow').hidden = true;
+  SFX.rollStop(); SFX.muffle(false); SFX.music('edit'); setCount(''); $('slow').hidden = true;
   $('result').innerHTML = ''; $('clock').innerHTML = '0.00<small>秒</small>'; $('speed').textContent = '';
   const db = dailyBlock();
   if (db) $('result').innerHTML = `<div class="card">${db}</div>`;
@@ -800,11 +872,11 @@ cv.addEventListener('pointerup', drop); cv.addEventListener('pointercancel', dro
 
 // ---------- boot ----------
 document.addEventListener('click', e => { const b = e.target.closest('button'); if (b && !b.disabled && b.id !== 'sound') SFX.tap(); });  // S-18
-$('sound').onclick = () => { settings.muted = !SFX.muted; saveSettings(); SFX.setMuted(settings.muted); renderSound(); SFX.tap(); };
+$('sound').onclick = () => { settings.muted = !SFX.muted; saveSettings(); SFX.setMuted(settings.muted); if (raced) SFX.enableMusic(); renderSound(); SFX.tap(); };
 SFX.setMuted(settings.muted); renderSound();
 if (!settings.muted) {
   // browsers only start audio inside a gesture: resume on the first touch
-  const wake = () => { SFX.setMuted(false); removeEventListener('pointerdown', wake); };
+  const wake = () => { SFX.setMuted(false); if (raced) SFX.enableMusic(); removeEventListener('pointerdown', wake); };
   addEventListener('pointerdown', wake);
 }
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readColors);
@@ -823,4 +895,5 @@ if (link && link.stale) {
   setLevel(link.idx);
   $('result').insertAdjacentHTML('afterbegin', '<div class="card"><p class="notice">友達のゴースト（紫）と同時にスタートします。</p></div>');
 }
+addEventListener('load', () => (window.requestIdleCallback || setTimeout)(loadRaceArt));
 requestAnimationFrame(tick);
