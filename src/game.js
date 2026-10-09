@@ -224,7 +224,7 @@ const crs = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0
 const nrm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 function camBasis() { cam.f = nrm(sub(cam.look, cam.pos)); cam.r = nrm(crs(cam.f, [0, 1, 0])); cam.u = crs(cam.r, cam.f); }
 function persp(x, y, z) {
-  const d = sub([x, y, z], cam.pos), zc = Math.max(0.3, dot(d, cam.f)), F = H * 1.3;
+  const d = sub([x, y, z], cam.pos), zc = Math.max(0.3, dot(d, cam.f)), F = H * F_LENS;
   return [W / 2 + F * dot(d, cam.r) / zc, H * 0.5 - F * dot(d, cam.u) / zc, F / zc];
 }
 const ease = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
@@ -313,6 +313,12 @@ function drawGate(g, z) {
 function drawGoal(gx, gy) {
   const zs = camT > 0.02 ? [-1.25, 1.25] : [0];
   ctx.save(); ctx.lineWidth = 3; ctx.strokeStyle = C.ink;
+  if (camT > 0.02) {
+    // the finish line painted across every lane: what the photo-finish camera judges against
+    const a = proj(gx, gy + 0.03, -3), b = proj(gx, gy + 0.03, 0.3);
+    ctx.save(); ctx.globalAlpha = ease(camT); ctx.lineCap = 'butt'; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = Math.max(2, 0.05 * b[2]);
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); ctx.restore();
+  }
   zs.forEach(z => { const a = proj(gx, gy - 0.15, z), b = proj(gx, gy + 0.9, z); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); });
   if (zs.length > 1) {
     const n = 10;
@@ -412,8 +418,11 @@ function drawAhead(e, T) {
 // the start: a wooden deck the lanes come out of, so the track no longer begins in mid-air
 const startSpan = entries => [Math.min(...entries.map(e => e.z)) - 0.28, 0.28];
 function drawStartDeck(entries) {
-  const [z0, z1] = startSpan(entries), x0 = -0.8, x1 = 0.04, y = START[1], th = 0.22;
-  ctx.save(); ctx.globalAlpha = ease(camT);
+  const [z0, z1] = startSpan(entries), x0 = -0.45, x1 = 0.04, y = START[1], th = 0.16;
+  // fades once the balls have left, so it never fills the frame of the chase camera
+  const a = ease(camT) * (race ? Math.max(0, 1 - race.T / 0.35) : 1);
+  if (a <= 0.01) return;
+  ctx.save(); ctx.globalAlpha = a;
   poly([proj(x0, y, z1), proj(x1, y, z1), proj(x1, y - th, z1), proj(x0, y - th, z1)], shade(C['wood-dark'], 0.95));
   poly([proj(x1, y, z0), proj(x1, y, z1), proj(x1, y - th, z1), proj(x1, y - th, z0)], shade(C['wood-dark'], 0.7));
   poly([proj(x0, y, z0), proj(x1, y, z0), proj(x1, y, z1), proj(x0, y, z1)], shade(C.wood, 1.05));
@@ -494,7 +503,7 @@ function draw() {
     entries.forEach(e => {
       const pose = ballPose(e.tr, e.sim, race ? race.T : 0);
       const top = drawBall(e, pose, e.kind === 'best' ? 0.45 : 1);
-      if (camT > 0.3) label(e.label, top, ENTRY_COLOR[e.kind] ? C[ENTRY_COLOR[e.kind]] : C.ink);
+      if (camT > 0.3 && race && (race.phase === 'intro' || race.shot === 'finish')) label(e.label, top, ENTRY_COLOR[e.kind] ? C[ENTRY_COLOR[e.kind]] : C.ink);
     });
     if (race && camT > 0.3) drawMiniMap(l, entries);
     if (race && race.parts.length) {
@@ -581,6 +590,91 @@ function drawJumpPreview(sim) {
   });
 }
 
+// ---------- camera director ----------
+// Shots (see README「カメラ設計」): course reveal → push-in on the start → side chase (speed-, slope-,
+// rival- and jump-aware) → hard cut to a fixed photo-finish camera on the line. Rules for every shot:
+//   · the camera stays on the near side of the player's lane (z > 0) and above the road, so the course is
+//     never seen from behind/below and ghost lanes (z < 0) never cover the player's lane;
+//   · position and aim follow critically damped springs (no snapping, no overshoot); shot changes are cuts;
+//   · the ball sits on the left third with its route ahead in the open two thirds.
+const DEG = Math.PI / 180, F_LENS = 1.3;   // focal length as a multiple of the canvas height (persp)
+const camVel = { look: [0, 0, 0], pos: [0, 0, 0] };
+function smoothDamp(cur, target, vel, st, dt) {
+  // critically damped spring (game-programming gems 4, ch. 1.10)
+  const o = 2 / st, x = o * dt, e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+  const ch = cur - target, tmp = (vel + o * ch) * dt;
+  return [target + (ch + tmp) * e, (vel - o * tmp) * e];
+}
+// camera placement from an aim point: distance d, yaw (+ = swung behind the ball, toward -x), pitch (+ = from above)
+function orbit(look, d, yaw, pitch) {
+  return [look[0] - d * Math.sin(yaw) * Math.cos(pitch), look[1] + d * Math.sin(pitch), look[2] + d * Math.cos(yaw) * Math.cos(pitch)];
+}
+function setShot(shot) { cam.look = shot.look.slice(); cam.pos = shot.pos.slice(); camVel.look = [0, 0, 0]; camVel.pos = [0, 0, 0]; }
+function wideShot() {
+  // the whole course fitted to the canvas, square-on from the side: matches the flat edit view it morphs from
+  const ys = race.entries.flatMap(e => e.tr.pts.map(p => p[1])), y0 = Math.min(...ys) - 0.3, y1 = START[1] + 0.6;
+  const hw = (BOX.x1 - BOX.x0) / 2 + 0.2, hh = (y1 - y0) / 2 + 0.2, F = F_LENS * H;
+  const d = Math.max(2 * F * hw / W, 2 * F * hh / H) + 0.5;
+  const look = [(BOX.x0 + BOX.x1) / 2, (y0 + y1) / 2, -0.5];
+  return { look, pos: orbit(look, d, 0, 6 * DEG) };
+}
+function startShot() {
+  const look = [START[0] + 0.7, START[1] - 0.45, -0.4];
+  return { look, pos: orbit(look, 4.2, 14 * DEG, 17 * DEG) };
+}
+function finishShot() {
+  // photo-finish camera: fixed on the finish line, looking straight across the track, at ball height
+  const g = lv().goal, look = [g[0] - 0.15, g[1] + 0.25, -0.6];
+  return { look, pos: [g[0] - 0.15, g[1] + 0.55, 3.4] };
+}
+function chaseShot() {
+  const p = race.player, endT = p.sim.ok ? p.sim.time : p.sim.t[p.sim.last], T = Math.min(race.T, endT);
+  const now = ballPose(p.tr, p.sim, T), ahead = ballPose(p.tr, p.sim, Math.min(T + 0.3, endT));
+  const dx = ahead.x - now.x, dy = ahead.y - now.y, dl = Math.hypot(dx, dy) || 1, slope = dy / dl;   // < 0 = heading down
+  // lead: aim ahead of the ball along its motion, more at speed → ball drifts to the left third
+  const lead = Math.min(0.9, 0.25 + now.speed * 0.08);
+  let aim = [now.x + dx / dl * lead, now.y + dy / dl * lead * 0.8];
+  let d = 4.0 + Math.min(1.6, now.speed * 0.13);
+  // steep drop ahead: rise and look down into it; climbing: drop lower and swing a little behind for depth
+  let pitch = (14 + 20 * Math.max(0, -slope)) * DEG, yaw = (6 + 10 * Math.max(0, slope)) * DEG;
+  // in the air: frame take-off and landing together
+  const fl = p.sim.flights.find(f => T >= f.t0 && T < f.t1 && f.landed);
+  if (fl) { const land = ballPose(p.tr, p.sim, fl.t1); aim = [(now.x + land.x) / 2, (now.y + land.y) / 2]; d += Math.min(1.5, Math.abs(land.x - now.x)); }
+  // two-shot when the rival is close, so the duel reads on screen
+  const r = race.entries.find(e => e.kind === 'rival');
+  if (r) {
+    const rp = ballPose(r.tr, r.sim, Math.min(race.T, r.sim.ok ? r.sim.time : r.sim.t[r.sim.last])), gap = Math.hypot(rp.x - now.x, rp.y - now.y);
+    if (gap < 1.2) { const w = 0.35 * (1 - gap / 1.2); aim = [aim[0] + (rp.x - aim[0]) * w, aim[1] + (rp.y - aim[1]) * w]; d += 0.8 * (1 - gap / 1.2); }
+  }
+  const g = lv().goal;
+  const look = [Math.min(aim[0], g[0] + 0.2), Math.max(aim[1], BOX.y0 + 0.5), -0.45];
+  const pos = orbit(look, d, yaw, pitch);
+  // never below the road near the camera: keep 0.6 m over the highest track point within ±1.2 m
+  let top = -Infinity; race.entries.forEach(e => e.tr.pts.forEach(q => { if (Math.abs(q[0] - pos[0]) < 1.2 && q[1] > top) top = q[1]; }));
+  pos[1] = Math.max(pos[1], top + 0.6); pos[2] = Math.max(pos[2], 2.6);
+  return { look, pos };
+}
+function cameraStart() {
+  race.shot = 'wide'; setShot(wideShot());
+}
+function director(dt) {
+  const p = race.player;
+  // pick the shot
+  if (race.phase === 'intro') { if (race.intro > 0.7 && race.shot === 'wide' && !REDUCED) race.shot = 'start'; }
+  else if (race.shot !== 'finish') {
+    race.shot = 'chase';
+    // cut to the line only when it is the player's own photo finish
+    if (!REDUCED && p.sim.ok && p.sim.time - race.T < 0.3 && race.slow) { race.shot = 'finish'; setShot(finishShot()); }
+  }
+  if (race.shot === 'finish') return;   // locked-off camera
+  const shot = race.shot === 'wide' ? wideShot() : race.shot === 'start' ? startShot() : chaseShot();
+  const st = race.shot === 'start' ? 0.22 : REDUCED ? 0.6 : 0.28;
+  for (let j = 0; j < 3; j++) {
+    [cam.look[j], camVel.look[j]] = smoothDamp(cam.look[j], shot.look[j], camVel.look[j], st, dt);
+    [cam.pos[j], camVel.pos[j]] = smoothDamp(cam.pos[j], shot.pos[j], camVel.pos[j], st * 1.25, dt);
+  }
+}
+
 // ---------- race ----------
 function bestPins() { const b = progress.best[lv().id]; return b && b.pins && b.pins.length === pins.length ? b.pins : null; }
 function entry(kind, ctrl, ballKey, z, labelText) {
@@ -608,7 +702,7 @@ function startRace(choice) {
   race = { T: 0, phase: 'intro', clock: 0, intro: 0, beat: -1, slow: false, entries, sorted: entries.slice().sort((a, b) => a.z - b.z),
            player: entries.find(e => e.kind === 'player'), choice,
            win: (() => { const pl = entries.find(e => e.kind === 'player'), rv = entries.find(e => e.kind === 'rival'); return pl.sim.ok && (!rv.sim.ok || pl.sim.time < rv.sim.time); })(), endT: Math.max(...entries.map(e => e.end)), parts: [], shake: 0 };
-  cam.look = [0.75, 2.6, -0.5]; cam.pos = [0.4, 4.6, 5.0];
+  cameraStart();
   mode = 'race'; highlight = null; picked = null; hideGuide();
   SFX.start(); SFX.music('race');
   $('result').innerHTML = ''; $('speed').textContent = ''; $('clock').innerHTML = '0.00<small>秒</small>'; renderDock(); $('tip').textContent = '実時間の0.6倍速で再生。ゴール直前は0.15倍';
@@ -669,15 +763,7 @@ function tick(ts) {
       race.parts.forEach(pt => { pt.vy -= G * pt.gk * dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.z += pt.vz * dt; pt.rot += pt.vr * dt; pt.life -= dt * pt.fade; });
       race.parts = race.parts.filter(pt => pt.life > 0);
     }
-    if (race && race.phase !== 'outro') {
-      // side-on chase of the player's own ball, framing where it is AND where its route goes next,
-      // so steep drops stay on screen (the old over-the-shoulder view lost the track ahead)
-      const p = race.player, endT = p.sim.ok ? p.sim.time : p.sim.t[p.sim.last];
-      const now = ballPose(p.tr, p.sim, race.T), ahead = ballPose(p.tr, p.sim, Math.min(race.T + 0.35, endT));
-      const lx = Math.min(now.x * 0.6 + ahead.x * 0.4, lv().goal[0]), ly = Math.max(now.y * 0.6 + ahead.y * 0.4, BOX.y0 + 0.5);
-      const look = [lx + 0.35, ly - 0.15, -0.5], pos = [lx + 0.1, ly + 1.75, 5.0], k = 1 - Math.pow(0.008, dt);
-      for (let j = 0; j < 3; j++) { cam.look[j] += (look[j] - cam.look[j]) * k; cam.pos[j] += (pos[j] - cam.pos[j]) * k; }
-    }
+    if (race && race.phase !== 'outro') director(dt);
     dirty = true;
   }
   if (dirty) { dirty = false; draw(); }
