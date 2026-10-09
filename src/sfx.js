@@ -38,13 +38,18 @@ const SFX = (() => {
     return loading[path];
   }
   const loadAll = paths => Promise.all(paths.map(load));
+  // stereo placement: pan -1 (left of the screen) … +1 (right); 0 or no panner support → centre
+  function out(pan) {
+    if (!pan || !ac.createStereoPanner) return sfxBus;
+    const p = ac.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, pan)); p.connect(sfxBus); return p;
+  }
   // play a loaded file; returns false so callers can fall back to the synthesised sound
-  function play(name, { gain = 1, rate = 1, at = 0 } = {}) {
+  function play(name, { gain = 1, rate = 1, at = 0, pan = 0 } = {}) {
     const a = ensure(), b = buf['sfx/' + name];
     if (!a || !b) return false;
     const s = a.createBufferSource(), g = a.createGain();
     s.buffer = b; s.playbackRate.value = rate; g.gain.value = gain;
-    s.connect(g); g.connect(sfxBus); s.start(a.currentTime + at);
+    s.connect(g); g.connect(out(pan)); s.start(a.currentTime + at);
     return true;
   }
 
@@ -62,21 +67,21 @@ const SFX = (() => {
     g.gain.exponentialRampToValueAtTime(peak, t0 + attack);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
   }
-  function tone(f, { f2, type = 'sine', at = 0, dur = 0.1, gain = 0.3, attack = 0.005 } = {}) {
+  function tone(f, { f2, type = 'sine', at = 0, dur = 0.1, gain = 0.3, attack = 0.005, pan = 0 } = {}) {
     const a = ensure(); if (!a) return;
     const t0 = a.currentTime + at, o = a.createOscillator(), g = a.createGain();
     o.type = type; o.frequency.setValueAtTime(f, t0);
     if (f2) o.frequency.exponentialRampToValueAtTime(f2, t0 + dur);
     env(g, t0, gain * 0.55, attack, dur);
-    o.connect(g); g.connect(sfxBus); o.start(t0); o.stop(t0 + dur + 0.03);
+    o.connect(g); g.connect(out(pan)); o.start(t0); o.stop(t0 + dur + 0.03);
   }
-  function burst({ at = 0, dur = 0.1, gain = 0.3, type = 'lowpass', f = 800, f2, q = 1 } = {}) {
+  function burst({ at = 0, dur = 0.1, gain = 0.3, type = 'lowpass', f = 800, f2, q = 1, pan = 0 } = {}) {
     const a = ensure(); if (!a) return;
     const t0 = a.currentTime + at, s = a.createBufferSource(), bq = a.createBiquadFilter(), g = a.createGain();
     s.buffer = noise(); bq.type = type; bq.frequency.setValueAtTime(f, t0); bq.Q.value = q;
     if (f2) bq.frequency.exponentialRampToValueAtTime(f2, t0 + dur);
     env(g, t0, gain * 0.55, 0.003, dur);
-    s.connect(bq); bq.connect(g); g.connect(sfxBus); s.start(t0, Math.random() * 1.5); s.stop(t0 + dur + 0.03);
+    s.connect(bq); bq.connect(g); g.connect(out(pan)); s.start(t0, Math.random() * 1.5); s.stop(t0 + dur + 0.03);
   }
   function bell(f, at = 0, dur = 0.6, gain = 0.25) {
     tone(f, { at, dur, gain }); tone(f * 2.76, { at, dur: dur * 0.5, gain: gain * 0.3 }); tone(f * 5.4, { at, dur: dur * 0.25, gain: gain * 0.12 });
@@ -84,7 +89,15 @@ const SFX = (() => {
   const notes = (seq, type, gain) => seq.forEach(([f, at, dur]) => tone(f, { type, at, dur, gain, attack: 0.01 }));
 
   // ---- S-01〜S-04: a speed-driven loop per ball, wind above 5 m/s ----
+  // The pack's three rolling loops share almost the same spectrum, so each ball gets its own colour here:
+  //   steel = dark and heavy (+ a sub rumble), hollow = boomy resonance, ring = bright rattle, ice = airy hiss.
   const LOOP = { solid: 'steel-loop', hollow: 'hollow-loop', ring: 'ring-loop', ice: 'ice-loop' };
+  const FEEL = {
+    solid: { rate: 0.8, peak: 180, q: 1.2, boost: 6, lp: 2400, rumble: 0.55 },
+    hollow: { rate: 1.05, peak: 420, q: 6, boost: 12, lp: 5000, rumble: 0.15 },
+    ring: { rate: 1.3, peak: 1500, q: 4, boost: 10, lp: 9000, rumble: 0.1 },
+    ice: { rate: 1.2, peak: 4000, q: 0.7, boost: 4, lp: 16000, rumble: 0 }
+  };
   const SYN = { solid: { f: 260, q: 2.5 }, hollow: { f: 170, q: 3.5 }, ring: { f: 140, q: 4 }, ice: { f: 2600, q: 0.6 } };
   function loopSource(name) {
     const s = ac.createBufferSource(), b = buf['sfx/' + name];
@@ -93,34 +106,43 @@ const SFX = (() => {
   }
   function rollStart(kind) {
     const a = ensure(); if (!a || roll) return;
+    const fe = FEEL[kind] || FEEL.solid, p = SYN[kind] || SYN.solid;
     const main = loopSource(LOOP[kind] || LOOP.solid), wind = loopSource('wind-loop');
-    const bq = a.createBiquadFilter(), g = a.createGain(), wbq = a.createBiquadFilter(), wg = a.createGain(), p = SYN[kind] || SYN.solid;
-    // real recordings pass through an open filter; the noise fallback is shaped into a rumble
+    const bq = a.createBiquadFilter(), col = a.createBiquadFilter(), g = a.createGain(), wbq = a.createBiquadFilter(), wg = a.createGain();
+    const pan = a.createStereoPanner ? a.createStereoPanner() : a.createGain();
+    // real recordings: per-ball resonance + low-pass; the noise fallback is shaped into a rumble
     bq.type = main.real ? 'lowpass' : (kind === 'ice' ? 'highpass' : 'bandpass');
-    bq.frequency.value = main.real ? 20000 : p.f; bq.Q.value = main.real ? 0.7 : p.q;
+    bq.frequency.value = main.real ? fe.lp : p.f; bq.Q.value = main.real ? 0.7 : p.q;
+    col.type = 'peaking'; col.frequency.value = fe.peak; col.Q.value = fe.q; col.gain.value = main.real ? fe.boost : 0;
     wbq.type = wind.real ? 'lowpass' : 'bandpass'; wbq.frequency.value = wind.real ? 20000 : 900; wbq.Q.value = 0.5;
     g.gain.value = 0; wg.gain.value = 0;
-    main.s.connect(bq); bq.connect(g); g.connect(sfxBus); wind.s.connect(wbq); wbq.connect(wg); wg.connect(sfxBus);
-    main.s.start(); wind.s.start(0, Math.random());
-    roll = { src: main.s, real: main.real, wreal: wind.real, bq, g, wsrc: wind.s, wbq, wg, p };
+    main.s.connect(col); col.connect(bq); bq.connect(g); g.connect(pan); wind.s.connect(wbq); wbq.connect(wg); wg.connect(pan); pan.connect(sfxBus);
+    // weight: a sub-bass rumble that follows speed, strongest for the solid steel ball
+    const sub = a.createOscillator(), sg = a.createGain(); sub.type = 'sine'; sub.frequency.value = 48; sg.gain.value = 0;
+    sub.connect(sg); sg.connect(pan);
+    main.s.start(); wind.s.start(0, Math.random()); sub.start();
+    roll = { src: main.s, real: main.real, wreal: wind.real, bq, g, wsrc: wind.s, wbq, wg, p, fe, pan, sub, sg };
   }
-  function rollSet(speed, airborne, kind) {
+  function rollSet(speed, airborne, kind, slow, panX) {
     if (muted) return;
     if (!roll) rollStart(kind);
     if (!roll) return;
-    const t = ac.currentTime, r = roll;
-    r.src.playbackRate.setTargetAtTime(r.real ? 0.7 + speed / 10 : 0.55 + speed / 7, t, 0.04);
-    if (!r.real) r.bq.frequency.setTargetAtTime(r.p.f * (0.7 + speed / 6), t, 0.04);
+    const t = ac.currentTime, r = roll, fe = r.fe, sl = slow ? 0.45 : 1;   // slow motion: everything drops and dulls
+    r.src.playbackRate.setTargetAtTime((r.real ? fe.rate * (0.7 + speed / 10) : 0.55 + speed / 7) * sl, t, 0.04);
+    r.bq.frequency.setTargetAtTime(r.real ? fe.lp * (slow ? 0.25 : 1) : r.p.f * (0.7 + speed / 6) * sl, t, 0.05);
     r.g.gain.setTargetAtTime(airborne ? 0.0001 : Math.min(r.real ? 0.9 : 0.5, 0.05 + speed / 7), t, 0.03);
-    if (!r.wreal) r.wbq.frequency.setTargetAtTime(600 + speed * 120, t, 0.08);
-    r.wsrc.playbackRate.setTargetAtTime(r.wreal ? 0.85 + speed / 20 : 1, t, 0.08);
-    r.wg.gain.setTargetAtTime(speed > 5 ? Math.min(0.5, (speed - 5) / 4 * 0.5) : 0.0001, t, 0.1);
+    if (!r.wreal) r.wbq.frequency.setTargetAtTime((600 + speed * 120) * sl, t, 0.08);
+    r.wsrc.playbackRate.setTargetAtTime((r.wreal ? 0.85 + speed / 20 : 1) * sl, t, 0.08);
+    r.wg.gain.setTargetAtTime(speed > 4 ? Math.min(0.55, (speed - 4) / 4 * 0.55) : 0.0001, t, 0.1);
+    r.sub.frequency.setTargetAtTime((38 + speed * 4) * sl, t, 0.05);
+    r.sg.gain.setTargetAtTime(airborne ? 0.0001 : fe.rumble * Math.min(1, speed / 6), t, 0.04);
+    if (r.pan.pan) r.pan.pan.setTargetAtTime(Math.max(-0.8, Math.min(0.8, panX || 0)), t, 0.05);
   }
   function rollStop() {
     if (!roll) return;
     const r = roll, t = ac.currentTime; roll = null;
-    r.g.gain.setTargetAtTime(0.0001, t, 0.05); r.wg.gain.setTargetAtTime(0.0001, t, 0.05);
-    r.src.stop(t + 0.3); r.wsrc.stop(t + 0.3);
+    r.g.gain.setTargetAtTime(0.0001, t, 0.05); r.wg.gain.setTargetAtTime(0.0001, t, 0.05); r.sg.gain.setTargetAtTime(0.0001, t, 0.05);
+    r.src.stop(t + 0.3); r.wsrc.stop(t + 0.3); r.sub.stop(t + 0.3);
   }
 
   // ---- M-01 / M-02: background music, fetched only after the first race (初回の読み込みを軽く) ----
@@ -165,13 +187,37 @@ const SFX = (() => {
     },
     roll: rollSet, rollStop,                                                                                                   // S-01〜S-04
     jump: () => play('jump', { gain: 0.7 }) || tone(260, { f2: 760, dur: 0.18, gain: 0.18 }),                                 // S-06
-    land(hit) {                                                                                                                // S-07
-      if (play(hit > 0.5 ? 'landing-hard' : 'landing-soft', { gain: 0.5 + 0.5 * hit })) return;
-      tone(120, { f2: 50, dur: 0.14 + 0.16 * hit, gain: 0.25 + 0.4 * hit }); burst({ f: 700 + 900 * hit, dur: 0.06 + 0.1 * hit, gain: 0.18 + 0.3 * hit });
+    land(hit, kind, pan) {                                                                                                     // S-07 + weight
+      play(hit > 0.5 ? 'landing-hard' : 'landing-soft', { gain: 0.4 + 0.4 * hit, pan });
+      // the pack's landings are almost all click (>10 kHz): add the body of the impact per ball
+      if (kind === 'ice') { burst({ type: 'highpass', f: 3500, f2: 7000, dur: 0.18 + 0.1 * hit, gain: 0.25 + 0.3 * hit, pan }); tone(900, { f2: 500, dur: 0.08, gain: 0.08, pan }); return; }
+      if (kind === 'hollow') { tone(150, { f2: 90, dur: 0.25, gain: 0.3 + 0.3 * hit, pan }); [460, 690, 1030].forEach((f, i) => tone(f, { type: 'triangle', dur: 0.35 - i * 0.07, gain: (0.12 - i * 0.03) * (0.6 + hit), pan })); return; }
+      if (kind === 'ring') { tone(130, { f2: 80, dur: 0.2, gain: 0.3 + 0.3 * hit, pan }); [1320, 1980].forEach((f, i) => tone(f, { type: 'triangle', dur: 0.25, gain: 0.07 * (0.6 + hit) / (i + 1), pan })); return; }
+      tone(95, { f2: 38, dur: 0.22 + 0.2 * hit, gain: 0.45 + 0.5 * hit, pan }); burst({ f: 380 + 500 * hit, dur: 0.08 + 0.1 * hit, gain: 0.25 + 0.35 * hit, pan });   // steel: deep thud
+    },
+    // one "カタン" per 0.5 m of track: the rhythm tightens as the ball speeds up
+    clack(kind, pan) {
+      const heavy = kind === 'solid', icy = kind === 'ice';
+      if (icy) { burst({ type: 'highpass', f: 5000, dur: 0.025, gain: 0.08, pan }); return; }
+      play('ratchet', { rate: heavy ? 0.55 : 0.8, gain: 0.35, pan }) || burst({ type: 'bandpass', f: 1800, q: 3, dur: 0.02, gain: 0.12, pan });
+      tone(heavy ? 120 : 210, { f2: heavy ? 80 : 160, dur: 0.05, gain: heavy ? 0.16 : 0.09, pan });
+    },
+    // a ball passing the player's ball: wind sweeping across the stereo field
+    whoosh(from, to) {
+      const a = ensure(); if (!a) return;
+      const t0 = a.currentTime, s = a.createBufferSource(), bq = a.createBiquadFilter(), g = a.createGain();
+      const p = a.createStereoPanner ? a.createStereoPanner() : null;
+      s.buffer = buf['sfx/wind-loop'] || noise(); bq.type = 'bandpass'; bq.Q.value = 1.2;
+      bq.frequency.setValueAtTime(700, t0); bq.frequency.exponentialRampToValueAtTime(2400, t0 + 0.18); bq.frequency.exponentialRampToValueAtTime(600, t0 + 0.45);
+      env(g, t0, 0.5, 0.12, 0.45);
+      s.connect(bq); bq.connect(g);
+      if (p) { p.pan.setValueAtTime(from, t0); p.pan.linearRampToValueAtTime(to, t0 + 0.45); g.connect(p); p.connect(sfxBus); } else g.connect(sfxBus);
+      s.start(t0, Math.random()); s.stop(t0 + 0.5);
     },
     slow: () => play('slow-motion', { gain: 0.7 }) || tone(260, { f2: 70, dur: 1.0, gain: 0.16, attack: 0.02 }),               // S-08
-    goal: mine => play('finish', { gain: mine ? 0.8 : 0.35, rate: mine ? 1 : 0.84 }) || bell(mine ? 1568 : 1175, 0, 0.5, mine ? 0.22 : 0.12), // S-09
-    shutter: () => play('photo-finish', { gain: 0.8 }) || burst({ type: 'highpass', f: 2500, dur: 0.035, gain: 0.3 }),        // S-10
+    goal: (mine, pan) => play('finish', { gain: mine ? 0.8 : 0.35, rate: mine ? 1 : 0.84, pan }) || bell(mine ? 1568 : 1175, 0, 0.5, mine ? 0.22 : 0.12), // S-09
+    // S-10 at the frozen photo-finish frame, with a flash "pop" under it
+    shutter: () => { (play('photo-finish', { gain: 0.9 }) || burst({ type: 'highpass', f: 2500, dur: 0.035, gain: 0.3 })); burst({ type: 'bandpass', f: 1200, f2: 300, dur: 0.25, gain: 0.18 }); },
     win: () => play('victory-jingle', { gain: 0.8 }) || notes([[523, 0, .14], [659, .12, .14], [784, .24, .14], [1047, .36, .9]], 'triangle', 0.2), // S-11
     lose: () => play('close-loss-jingle', { gain: 0.8 }) || notes([[392, 0, .2], [330, .18, .22], [349, .42, .16], [392, .58, .8]], 'triangle', 0.17), // S-12
     best: () => play('personal-best', { gain: 0.7 }) || notes([[1568, 0, .1], [2093, .08, .1], [2637, .16, .5]], 'sine', 0.14), // S-13

@@ -297,6 +297,16 @@ function drawLane3D(tr, z, opt) {
       ctx.globalAlpha = Math.min(0.5, Math.abs(f - 1)); poly([q1, q2, q3, q4], f < 1 ? '#000' : '#fff'); ctx.globalAlpha = 1;
     } else { poly([q1, q2, q3, q4], top); ctx.strokeStyle = top; ctx.stroke(); }
   }
+  if (opt.wood) {
+    // sleepers every TIE_M of track: they stream past the camera, so speed reads at a glance
+    ctx.strokeStyle = 'rgba(45,22,6,.5)'; ctx.lineCap = 'butt';
+    let last = Math.floor(tr.s[0] / TIE_M);
+    for (let i = 1; i < P.length; i++) {
+      const k = Math.floor(tr.s[i] / TIE_M); if (k === last) continue; last = k;
+      const a = proj(P[i][0], P[i][1] + 0.004, z - w * 0.92), b = proj(P[i][0], P[i][1] + 0.004, z + w * 0.92);
+      ctx.lineWidth = Math.max(1, 0.014 * b[2]); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+  }
   // steel rails along both edges
   [z - w, z + w].forEach((zz, k) => {
     ctx.beginPath();
@@ -349,6 +359,11 @@ function ballPose(tr, sim, T) {
            spin: (tr.s[i - 1] + (tr.s[i] - tr.s[i - 1]) * u) / BALL_R, speed: sim.v[i - 1] + (sim.v[i] - sim.v[i - 1]) * u, airborne: false };
 }
 const ENTRY_COLOR = { rival: 'cobalt', friend: 'friend' };
+// how heavy each ball should FEEL on landing (shake, debris, thud). Physics is unaffected: rolling time
+// depends on the shape (k), not the mass — which is exactly what the game teaches.
+const HEFT = { solid: 1, hollow: 0.55, ring: 0.7, ice: 0.8 };
+const TIE_M = 0.25, CLACK_M = 0.5;   // sleeper spacing on the lane / one "カタン" per this much track
+const panOf = (x, y, z) => Math.max(-1, Math.min(1, proj(x, y, z)[0] / W * 2 - 1));
 function drawBall(e, pose, alpha) {
   const z = e.z, R = BALL_R, q = proj(pose.x, pose.y, z), r = Math.max(3, R * q[2]), e3 = ease(camT);
   ctx.save();
@@ -361,8 +376,8 @@ function drawBall(e, pose, alpha) {
   }
   const tint = ENTRY_COLOR[e.kind] ? C[ENTRY_COLOR[e.kind]] : null;
   // motion trail from the last few frames, only at speed
-  if (e.trail && e.trail.length > 2 && pose.speed > 2.5) {
-    ctx.globalAlpha = alpha * 0.22 * Math.min(1, (pose.speed - 2.5) / 4); ctx.lineCap = 'round';
+  if (e.trail && e.trail.length > 2 && pose.speed > 1.5) {
+    ctx.globalAlpha = alpha * 0.35 * Math.min(1, (pose.speed - 1.5) / 4); ctx.lineCap = 'round';
     ctx.strokeStyle = tint || C.steel; ctx.lineWidth = r * 1.4; ctx.beginPath();
     e.trail.forEach((w, j) => { const m = proj(w[0], w[1], z); j ? ctx.lineTo(m[0], m[1]) : ctx.moveTo(m[0], m[1]); });
     ctx.lineTo(q[0], q[1]); ctx.stroke();
@@ -487,6 +502,7 @@ function draw() {
     ctx.fillStyle = '#08111c'; ctx.globalAlpha = ease(camT) * 0.35; ctx.fillRect(0, 0, W, H); ctx.restore();   // dim so the course reads first
   }
   if (race && race.shake > 0.01 && !REDUCED) ctx.translate((Math.random() - 0.5) * race.shake * 10, (Math.random() - 0.5) * race.shake * 10);
+  if (race && race.vibe > 0.01 && !REDUCED) ctx.translate((Math.random() - 0.5) * race.vibe * 1.6, (Math.random() - 0.5) * race.vibe * 1.6);   // rail buzz at speed
   drawGround();
   const l = lv();
   if (mode === 'race' || camT > 0.001) {
@@ -515,9 +531,12 @@ function draw() {
           const sz = Math.max(4, pt.size * m[2]);
           ctx.translate(m[0], m[1]); ctx.rotate(pt.rot);
           ctx.drawImage(im, -sz / 2, -sz / 2, sz, sz);
-        } else { ctx.beginPath(); ctx.arc(m[0], m[1], Math.max(1, 0.02 * m[2]), 0, Math.PI * 2); ctx.fill(); }
+        } else { ctx.fillStyle = pt.color || C.wood; ctx.beginPath(); ctx.arc(m[0], m[1], Math.max(1, (pt.color ? 0.015 : 0.02) * m[2]), 0, Math.PI * 2); ctx.fill(); }
       });
       ctx.restore();
+    }
+    if (race && race.flash > 0.01) {   // photo-finish flash
+      ctx.save(); ctx.setTransform(DPR, 0, 0, DPR, 0, 0); ctx.globalAlpha = race.flash * (REDUCED ? 0.25 : 0.8); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H); ctx.restore();
     }
     return;
   }
@@ -634,7 +653,7 @@ function chaseShot() {
   // lead: aim ahead of the ball along its motion, more at speed → ball drifts to the left third
   const lead = Math.min(0.9, 0.25 + now.speed * 0.08);
   let aim = [now.x + dx / dl * lead, now.y + dy / dl * lead * 0.8];
-  let d = 4.0 + Math.min(1.6, now.speed * 0.13);
+  let d = 4.6 - Math.min(0.9, now.speed * 0.12);   // pull IN at speed: the world streams past faster
   // steep drop ahead: rise and look down into it; climbing: drop lower and swing a little behind for depth
   let pitch = (14 + 20 * Math.max(0, -slope)) * DEG, yaw = (6 + 10 * Math.max(0, slope)) * DEG;
   // in the air: frame take-off and landing together
@@ -699,7 +718,7 @@ function startRace(choice) {
     e.end = e.sim.ok ? e.sim.time : e.sim.t[e.sim.last] + (e.sim.fail === 'fly' ? 0.7 : 0.4);
     e.trail = [];
   });
-  race = { T: 0, phase: 'intro', clock: 0, intro: 0, beat: -1, slow: false, entries, sorted: entries.slice().sort((a, b) => a.z - b.z),
+  race = { T: 0, phase: 'intro', clock: 0, intro: 0, beat: -1, slow: false, tie: 0, pass: 0, vibe: 0, flash: 0, freeze: 0, entries, sorted: entries.slice().sort((a, b) => a.z - b.z),
            player: entries.find(e => e.kind === 'player'), choice,
            win: (() => { const pl = entries.find(e => e.kind === 'player'), rv = entries.find(e => e.kind === 'rival'); return pl.sim.ok && (!rv.sim.ok || pl.sim.time < rv.sim.time); })(), endT: Math.max(...entries.map(e => e.end)), parts: [], shake: 0 };
   cameraStart();
@@ -723,28 +742,44 @@ function tick(ts) {
       const slow = rem < 0.22;
       if (slow !== race.slow) { race.slow = slow; $('slow').hidden = !slow; SFX.muffle(slow); if (slow) SFX.slow(); }
       const T0 = race.T;
-      race.T = Math.min(race.endT, race.T + dt * (slow ? PLAY_SLOW : PLAY_RATE));
+      if (race.freeze > 0) race.freeze -= dt;   // hit-stop on the player's own photo-finish frame
+      else race.T = Math.min(race.endT, race.T + dt * (slow ? PLAY_SLOW : PLAY_RATE));
       const p = race.player;
       $('clock').innerHTML = (p.sim.ok ? Math.min(race.T, p.sim.time) : race.T).toFixed(2) + '<small>秒</small>';
       const ps = ballPose(p.tr, p.sim, race.T);
       $('speed').textContent = `${(ps.speed * 3.6).toFixed(0)} km/h`;
       const playerDone = p.sim.ok ? race.T >= p.sim.time : race.T >= p.sim.t[p.sim.last];
-      if (playerDone) SFX.rollStop(); else SFX.roll(ps.speed, ps.airborne, p.ball);
+      const pPan = panOf(ps.x, ps.y, p.z);
+      if (playerDone) SFX.rollStop(); else SFX.roll(ps.speed, ps.airborne, p.ball, slow, pPan);
+      race.vibe = playerDone || ps.airborne ? 0 : Math.max(0, (ps.speed - 4) / 4);
+      // "カタン" every CLACK_M of track rolled
+      const tie = Math.floor(ps.spin * BALL_R / CLACK_M);
+      if (!ps.airborne && !playerDone && tie > race.tie) SFX.clack(p.ball, pPan);
+      race.tie = tie;
+      // the rival overtaking (or being overtaken): a whoosh that crosses the stereo field
+      const rv = race.entries.find(e => e.kind === 'rival');
+      if (rv && rv !== p && !playerDone) {
+        const rp = ballPose(rv.tr, rv.sim, race.T), dx = rp.x - ps.x, sg = Math.abs(dx) > 0.03 ? Math.sign(dx) : race.pass;
+        if (race.pass && sg !== race.pass && race.T > 0.15 && Math.hypot(dx, rp.y - ps.y) < 1.2) SFX.whoosh(-0.7 * sg, 0.7 * sg);
+        race.pass = sg;
+      }
       race.entries.forEach(e => {
         const ep = e === p ? ps : ballPose(e.tr, e.sim, race.T);
-        e.trail.push([ep.x, ep.y]); if (e.trail.length > 7) e.trail.shift();
+        e.trail.push([ep.x, ep.y]); if (e.trail.length > 10) e.trail.shift();
         e.sim.flights.forEach(f => {
           if (e === p && T0 < f.t0 && race.T >= f.t0) SFX.jump();
           if (f.landed && T0 < f.t1 && race.T >= f.t1) {
             // landing: dust, a short camera shake, and a tap on phones that allow it
-            const [, yt] = trackYAt(e.tr.pts, ep.x, 0), hit = Math.min(1, Math.hypot(f.vx, f.vy) / 8);
-            for (let q = 0; q < 14; q++) race.parts.push({ x: ep.x, y: yt + 0.02, z: e.z + (Math.random() - 0.5) * 0.3, vx: (Math.random() - 0.3) * 1.6, vy: Math.random() * 1.8 * hit + 0.3, vz: (Math.random() - 0.5) * 1.2,
-              life: 1, fade: 1.4, gk: 0.5, img: FX[q % 3], size: 0.1, rot: Math.random() * 6, vr: (Math.random() - 0.5) * 14 });
-            if (e === p) { race.shake = 0.6 * hit + 0.2; SFX.land(hit); try { navigator.vibrate && navigator.vibrate(18); } catch (err) {} }
+            const [, yt] = trackYAt(e.tr.pts, ep.x, 0), hit = Math.min(1, Math.hypot(f.vx, f.vy) / 8), heft = HEFT[e.ball] || 1, ice = e.ball === 'ice';
+            // debris scales with how heavy the ball should feel; the ice ball sprays ice, not wood
+            const n = Math.round((ice ? 20 : 10) * (0.5 + heft) * (0.6 + hit));
+            for (let q = 0; q < n; q++) race.parts.push({ x: ep.x, y: yt + 0.02, z: e.z + (Math.random() - 0.5) * 0.3, vx: (Math.random() - 0.3) * 1.6 * (ice ? 1.4 : 1), vy: Math.random() * 1.8 * hit * heft + 0.3, vz: (Math.random() - 0.5) * 1.2,
+              life: 1, fade: ice ? 1.8 : 1.4, gk: ice ? 0.35 : 0.5, img: ice ? null : FX[q % 3], color: ice ? '#d9f6ff' : null, size: 0.1 * (0.7 + 0.3 * heft), rot: Math.random() * 6, vr: (Math.random() - 0.5) * 14 });
+            if (e === p) { race.shake = (0.7 * hit + 0.2) * heft; SFX.land(hit, e.ball, panOf(ep.x, ep.y, e.z)); try { navigator.vibrate && navigator.vibrate(Math.round(10 + 22 * heft * hit)); } catch (err) {} }
           }
         });
         if (e.sim.ok && T0 < e.sim.time && race.T >= e.sim.time) {
-          SFX.goal(e === p);
+          SFX.goal(e === p, panOf(ep.x, ep.y, e.z));
           if (e === p && race.win) {   // confetti over the finish line
             const g = lv().goal;
             for (let q = 0; q < 46; q++) race.parts.push({ x: g[0] - 0.1, y: g[1] + 0.9, z: (Math.random() - 0.5) * 2.4, vx: -Math.random() * 2.2, vy: Math.random() * 2.6 + 0.6, vz: (Math.random() - 0.5) * 1.5,
@@ -752,14 +787,18 @@ function tick(ts) {
           }
         }
       });
-      if (p.sim.ok && T0 < p.sim.time && race.T >= p.sim.time) { try { navigator.vibrate && navigator.vibrate([10, 40, 25]); } catch (err) {} }
+      if (p.sim.ok && T0 < p.sim.time && race.T >= p.sim.time) {
+        // the photo is taken: flash, shutter, and a brief freeze-frame
+        race.flash = 1; race.freeze = REDUCED ? 0 : 0.22; SFX.shutter();
+        try { navigator.vibrate && navigator.vibrate([10, 40, 25]); } catch (err) {}
+      }
       const failAt = p.sim.t[p.sim.last];
       if (!p.sim.ok && T0 < failAt && race.T >= failAt) { if (p.sim.fail === 'fly') SFX.courseOut(); else if (p.sim.fail === 'stall') SFX.stall(); }
       if (race.T >= race.endT) { race.phase = 'hold'; race.clock = 0; $('slow').hidden = true; SFX.rollStop(); SFX.muffle(false); }
     } else if (race.phase === 'hold') { race.clock += dt; if (race.clock > 0.8) race.phase = 'outro'; }
     else if (race.phase === 'outro') { camT = Math.max(0, camT - dt / 0.6); if (camT <= 0) finishRace(); }
     if (race) {
-      race.shake *= Math.pow(0.02, dt);
+      race.shake *= Math.pow(0.02, dt); race.flash = Math.max(0, (race.flash || 0) - dt * 2.8);
       race.parts.forEach(pt => { pt.vy -= G * pt.gk * dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.z += pt.vz * dt; pt.rot += pt.vr * dt; pt.life -= dt * pt.fade; });
       race.parts = race.parts.filter(pt => pt.life > 0);
     }
@@ -800,7 +839,7 @@ function explainLoss(l, diff) {
 function finishRace() {
   const l = lv(), p = race.player, r = race.entries.find(e => e.kind === 'rival'), fr = race.entries.find(e => e.kind === 'friend');
   mode = 'edit'; const res = $('result'), unlockedBefore = progress.unlocked;
-  SFX.shutter(); SFX.music('edit');
+  SFX.music('edit');
   if (!raced) { raced = true; SFX.enableMusic(); loadScenery(); }
   let jingle = 'lose', pb = false;
   if (l.kind === 'predict') {
@@ -843,6 +882,13 @@ function finishRace() {
     if ($('nx')) $('nx').onclick = () => setLevel(L + 1);
   }
   race = null; $('clock').innerHTML = (p.sim.ok ? p.sim.time.toFixed(2) : '--.--') + '<small>秒</small>';
+  if (SFX.muted && !settings.soundHinted) {
+    // the game starts muted (素材リスト); after the first race, suggest sound once
+    settings.soundHinted = true; saveSettings();
+    res.insertAdjacentHTML('afterbegin', `<div class="card"><p class="why"><b>音ありがおすすめ</b> 転がる音・着地の手応え・写真判定のシャッターで、速さと重さが伝わります。</p>
+      <div class="row"><button class="btn" id="sndOn">${ic('vol')}音をONにする</button></div></div>`);
+    $('sndOn').onclick = () => { $('sound').click(); $('sndOn').closest('.card').remove(); };
+  }
   setTimeout(() => { SFX[jingle](); if (pb) setTimeout(SFX.best, 900); if (progress.unlocked > unlockedBefore) setTimeout(SFX.unlock, 1500); }, 180);
   renderLevels(); renderDock(); bindShare(); invalidate(true);
 }
